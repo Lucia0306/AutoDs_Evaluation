@@ -32,8 +32,6 @@ Generated files:
 # Run
 
 Run the Evaluation Agent with:
-
-```bash
 python run_evaluation.py
 
 # Curremt Features
