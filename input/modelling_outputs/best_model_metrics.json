@@ -1,0 +1,20 @@
+{
+  "rank": 1,
+  "model_name": "logistic_regression",
+  "cv_runtime_seconds": 0.0121,
+  "cv_accuracy": 0.6666666666666666,
+  "cv_precision": 0.8333333333333333,
+  "cv_recall": 0.75,
+  "cv_f1": 0.7333333333333334,
+  "cv_roc_auc": 1.0,
+  "cv_std_accuracy": 0.0,
+  "cv_std_precision": 0.16666666666666669,
+  "cv_std_recall": 0.25,
+  "cv_std_f1": 0.06666666666666671,
+  "cv_std_roc_auc": 0.0,
+  "test_accuracy": 1.0,
+  "test_precision": 1.0,
+  "test_recall": 1.0,
+  "test_f1": 1.0,
+  "test_roc_auc": 1.0
+}
