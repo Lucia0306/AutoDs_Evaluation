@@ -20,8 +20,10 @@ class EvaluationAgent:
     Responsibility:
     - Consume standardised modelling artifacts
     - Benchmark candidate models using exported modelling results
-    - Summarise model comparison
-    - Present technical evidence for best model selection
+    - Compare candidate models under a common benchmark
+    - Validate model-selection consistency across exported artifacts
+    - Present technical evidence for best-model selection
+    - Perform prediction-level error analysis for the selected best model
     - Save structured evaluation outputs
     """
 
@@ -32,7 +34,7 @@ class EvaluationAgent:
         self.diagnostics_: Dict[str, Any] = {}
         self.modelling_summary_: Dict[str, Any] = {}
         self.modelling_metadata_: Dict[str, Any] = {}
-        self.best_model_predictions_: pd.DataFrame = pd.DataFrame()
+        self.best_model_predictions_: Optional[pd.DataFrame] = None
         self.best_model_feature_importance_: Optional[pd.DataFrame] = None
         self.summary_: Dict[str, Any] = {}
 
@@ -60,8 +62,10 @@ class EvaluationAgent:
             "primary_metric": self.modelling_summary_.get("primary_metric"),
             "best_model_name": self.modelling_summary_.get("best_model_name"),
             "benchmark_overview": self._build_benchmark_overview(),
+            "consistency_checks": self._validate_modelling_outputs(),
             "best_model_selection_evidence": self._build_best_model_selection_evidence(),
             "best_model_evaluation": self._build_best_model_evaluation(),
+            "error_analysis": self._build_error_analysis(),
             "limitations": self.modelling_summary_.get("limitations", []),
         }
 
@@ -140,39 +144,53 @@ class EvaluationAgent:
         return checks
     
     def _build_benchmark_overview(self) -> Dict[str, Any]:
-        """
-        Build a benchmark overview from leaderboard.csv.
-        """
         primary_metric = self.modelling_summary_.get("primary_metric")
         best_model_name = self.modelling_summary_.get("best_model_name")
 
         columns_to_keep = [
-            "rank",
-            "model_name",
-            "cv_accuracy",
-            "cv_precision",
-            "cv_recall",
-            "cv_f1",
-            "cv_roc_auc",
-            "test_accuracy",
-            "test_precision",
-            "test_recall",
-            "test_f1",
-            "test_roc_auc",
+        "rank", "model_name",
+        "cv_accuracy", "cv_precision", "cv_recall", "cv_f1", "cv_roc_auc",
+        "test_accuracy", "test_precision", "test_recall", "test_f1", "test_roc_auc",
         ]
-
         available_columns = [col for col in columns_to_keep if col in self.leaderboard_.columns]
         benchmark_table = self.leaderboard_[available_columns].to_dict(orient="records")
 
         top_ranked_model = None
-        if not self.leaderboard_.empty and "model_name" in self.leaderboard_.columns:
-            top_ranked_model = str(self.leaderboard_.iloc[0]["model_name"])
+        second_best_model = None
+        top_model_margin_over_second = None
 
+        metric_column = f"test_{primary_metric}" if primary_metric else None
+
+        if (
+            metric_column
+            and metric_column in self.leaderboard_.columns
+            and not self.leaderboard_.empty
+            and "model_name" in self.leaderboard_.columns
+        ):
+            ranked = (self.leaderboard_.sort_values(by=metric_column, ascending=False).reset_index(drop=True))
+
+            top_ranked_model = str(ranked.iloc[0]["model_name"])
+
+            if len(ranked) > 1:
+                second_best_model = str(ranked.iloc[1]["model_name"])
+
+                top_value = ranked.iloc[0][metric_column]
+                second_value = ranked.iloc[1][metric_column]
+
+                if pd.notna(top_value) and pd.notna(second_value):
+                    top_model_margin_over_second = float(top_value - second_value)
+
+        elif not self.leaderboard_.empty and "model_name" in self.leaderboard_.columns:
+            top_ranked_model = str(self.leaderboard_.iloc[0]["model_name"])
+            if len(self.leaderboard_) > 1:
+                second_best_model = str(self.leaderboard_.iloc[1]["model_name"])
 
         return {
             "candidate_model_count": int(len(self.leaderboard_)),
             "primary_metric": primary_metric,
             "top_ranked_model": top_ranked_model,
+            "second_best_model": second_best_model,
+            "top_model_margin_over_second": top_model_margin_over_second,
             "selected_best_model": best_model_name,
             "comparison_table": benchmark_table,
         }
@@ -244,6 +262,60 @@ class EvaluationAgent:
             "selection_metric_value": selection_metric_value,
             "selection_rank": selection_rank,
         }
+    
+    def _build_error_analysis(self) -> Dict[str, Any]:
+        '''
+        this implementation assumes binary labels encoded as 0 and 1
+        '''
+        if self.best_model_predictions_ is None or self.best_model_predictions_.empty:
+            return {"available": False, "reason": "best_model_predictions.csv not found or empty"}
+
+        df = self.best_model_predictions_.copy()
+        required_cols = {"y_true", "y_pred"}
+
+        if not required_cols.issubset(df.columns):
+            return {
+                "available": False,
+                "reason": f"Required columns missing. Found columns: {list(df.columns)}"
+            }
+
+        y_true = df["y_true"]
+        y_pred = df["y_pred"]
+
+        tp = int(((y_true == 1) & (y_pred == 1)).sum())
+        tn = int(((y_true == 0) & (y_pred == 0)).sum())
+        fp = int(((y_true == 0) & (y_pred == 1)).sum())
+        fn = int(((y_true == 1) & (y_pred == 0)).sum())
+
+        accuracy = float((y_true == y_pred).mean())
+        precision = float(tp / (tp + fp)) if (tp + fp) > 0 else 0.0
+        recall = float(tp / (tp + fn)) if (tp + fn) > 0 else 0.0
+        f1 = float(2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+        return {
+            "available": True,
+            "confusion_matrix": {
+                "tp": tp,
+                "tn": tn,
+                "fp": fp,
+                "fn": fn,
+            },
+            "classification_metrics_from_predictions": {
+                "accuracy": accuracy,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1,
+            },
+            "error_summary": {
+                "false_positives": fp,
+                "false_negatives": fn,
+                "dominant_error_type": (
+                    "false_positives" if fp > fn else
+                    "false_negatives" if fn > fp else
+                    "balanced"
+                ),
+            },
+        }
 
     def _save_results(self, summary: Dict[str, Any]) -> None:
         """
@@ -263,12 +335,15 @@ class EvaluationAgent:
         Return a minimal technical summary strictly within the evaluation boundary.
         """
         if not self.summary_:
-            raise ValueError("Evaluation has not been run yet.")
+            return {"message": "No evaluation summary available. Run the agent first."}
+        
+        benchmark = self.summary_.get("benchmark_overview", {})
+        evidence = self.summary_.get("best_model_selection_evidence", {})
         
         return {
             "primary_metric": self.summary_.get("primary_metric"),
             "best_model_name": self.summary_.get("best_model_name"),
-            "candidate_model_count": self.summary_.get("benchmark_overview", {}).get("candidate_model_count"),
-            "top_ranked_model": self.summary_.get("benchmark_overview", {}).get("top_ranked_model"),
-            "best_model_selection_evidence": self.summary_.get("best_model_selection_evidence"),
+            "candidate_model_count": benchmark.get("candidate_model_count"),
+            "top_ranked_model": benchmark.get("top_ranked_model"),
+            "selection_metric_value": evidence.get("selection_metric_value"),
         }
