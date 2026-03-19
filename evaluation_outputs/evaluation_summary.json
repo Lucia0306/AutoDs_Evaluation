@@ -6,6 +6,8 @@
     "candidate_model_count": 3,
     "primary_metric": "roc_auc",
     "top_ranked_model": "logistic_regression",
+    "second_best_model": "random_forest",
+    "top_model_margin_over_second": 0.0,
     "selected_best_model": "logistic_regression",
     "comparison_table": [
       {
@@ -51,6 +53,18 @@
         "test_roc_auc": 0.5
       }
     ]
+  },
+  "consistency_checks": {
+    "primary_metric_present": true,
+    "best_model_name_present": true,
+    "leaderboard_available": true,
+    "leaderboard_top_model": "logistic_regression",
+    "best_model_matches_leaderboard_rank1": true,
+    "primary_metric_column_present": true,
+    "top_model_by_primary_metric": "logistic_regression",
+    "best_model_matches_primary_metric_ranking": true,
+    "best_model_metrics_match_summary": true,
+    "diagnostics_match_summary": true
   },
   "best_model_selection_evidence": {
     "selected_model": "logistic_regression",
@@ -117,6 +131,10 @@
     ],
     "feature_importance_available": false,
     "feature_importance_top_rows": []
+  },
+  "error_analysis": {
+    "available": false,
+    "reason": "Required columns missing. Found columns: ['test_predictions', 'test_truth', 'test_scores']"
   },
   "limitations": [
     "Training sample size is very small for academic performance claims; treat current metrics as smoke-test evidence only.",
