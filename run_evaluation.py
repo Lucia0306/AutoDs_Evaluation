@@ -12,4 +12,5 @@ config = EvaluationConfig(
 agent = EvaluationAgent(config)
 summary = agent.run()
 
+print("Evaluation completed.")
 print(agent.get_minimal_summary())
