@@ -1,5 +1,5 @@
 from pathlib import Path
-from evaluation import EvaluationAgent, EvaluationConfig
+from Evaluation_agent import EvaluationAgent, EvaluationConfig
 
 BASE_DIR = Path(__file__).resolve().parent
 
