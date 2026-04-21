@@ -26,6 +26,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -94,6 +95,7 @@ class EvaluationConfig:
     modelling_output_dir: str = "model_outputs"
     output_dir: str = "evaluation_outputs"
     save_artifacts: bool = True
+    upstream_context: Optional[Dict[str, Any]] = None
 
 
 def is_higher_better(metric_name: Optional[str]) -> bool:
@@ -732,6 +734,8 @@ class EvaluationAgent:
         self.best_model_feature_importance_: Optional[pd.DataFrame] = None
         self.summary_: Dict[str, Any] = {}
         self.task_variant_: Optional[str] = None
+        self.upstream_context_: Dict[str, Any] = {}
+        self.stage_handoff_: Dict[str, Any] = {}
 
     def run(self) -> Dict[str, Any]:
         modelling_dir = Path(self.config.modelling_output_dir)
@@ -749,6 +753,7 @@ class EvaluationAgent:
             modelling_dir / "best_model_feature_importance.csv"
         )
 
+        self._absorb_upstream_context()
         evaluator = self._resolve_evaluator()
 
         summary = {
@@ -763,13 +768,166 @@ class EvaluationAgent:
             "error_analysis": evaluator.build_error_analysis(),
             "limitations": self.modelling_summary_.get("limitations", []),
         }
-
+       
         self.summary_ = summary
+        self.stage_handoff_ = self._build_stage_handoff()
+        self.summary_["stage_handoff"] = self.stage_handoff_
 
         if self.config.save_artifacts:
-            self._save_results(summary)
+            self._save_results(self.summary_)
 
-        return summary
+        return self.summary_
+    
+    
+    def _absorb_upstream_context(self) -> None:
+        """
+        Absorb standardised upstream context passed from earlier stages.
+
+        Relevant upstream signals for EvaluationAgent include:
+        - primary_metric and constraints from Stage 0
+        - leaderboard_top3, models_succeeded, and best_model_name from Stage 4
+        """
+        context = self.config.upstream_context or {}
+        self.upstream_context_ = context
+
+        stage0 = context.get("stage_0", {})
+        stage4 = context.get("stage_4", {})
+
+        if not self.modelling_summary_.get("primary_metric"):
+            upstream_primary_metric = stage0.get("primary_metric")
+            if upstream_primary_metric:
+                self.modelling_summary_["primary_metric"] = upstream_primary_metric
+
+        if not self.modelling_summary_.get("best_model_name"):
+            upstream_best_model = stage4.get("best_model_name")
+            if upstream_best_model:
+                self.modelling_summary_["best_model_name"] = upstream_best_model
+
+        self.modelling_summary_["_upstream_constraints"] = stage0.get("constraints", {})
+        self.modelling_summary_["_upstream_leaderboard_top3"] = stage4.get("leaderboard_top3", [])
+        self.modelling_summary_["_upstream_models_succeeded"] = stage4.get("models_succeeded", [])
+
+    def _grade_evaluation(
+        self,
+        primary_metric: Optional[str],
+        score: Optional[float],
+        problem_type: Optional[str],
+    ) -> str:
+        """
+        Grade evaluation outcome using simple metric-aware thresholds.
+
+        This grading is intended for stage handoff summarisation rather than
+        replacing the underlying metric-based evaluation logic.
+        """
+        if score is None or primary_metric is None:
+            return "unknown"
+
+        if is_higher_better(primary_metric):
+            if score >= 0.90:
+                return "excellent"
+            if score >= 0.80:
+                return "good"
+            if score >= 0.70:
+                return "acceptable"
+            return "poor"
+
+        if score <= 0.10:
+            return "excellent"
+        if score <= 0.20:
+            return "good"
+        if score <= 0.30:
+            return "acceptable"
+        return "poor"
+    
+    def _check_threshold_met(
+        self,
+        primary_metric: Optional[str],
+        score: Optional[float],
+    ) -> Optional[bool]:
+        """
+        Check whether the selected model meets the minimum metric threshold
+        provided by upstream planning constraints, if available.
+        """
+        constraints = self.modelling_summary_.get("_upstream_constraints", {}) or {}
+        threshold = constraints.get("min_metric_threshold")
+
+        if threshold is None or score is None or primary_metric is None:
+            return None
+
+        if is_higher_better(primary_metric):
+            return score >= threshold
+        return score <= threshold
+    
+
+    def _build_stage_handoff(self) -> Dict[str, Any]:
+        """
+        Build a standardised stage handoff payload for downstream agents.
+        """
+        primary_metric = self.summary_.get("primary_metric")
+        best_model_name = self.summary_.get("best_model_name")
+        evidence = self.summary_.get("best_model_selection_evidence", {})
+        evaluation_block = self.summary_.get("best_model_evaluation", {})
+        error_analysis = self.summary_.get("error_analysis", {})
+        consistency = self.summary_.get("consistency_checks", {})
+
+        primary_metric_score = evidence.get("selection_metric_value")
+        problem_type = self.summary_.get("problem_type")
+
+        evaluation_grade = self._grade_evaluation(
+            primary_metric,
+            primary_metric_score,
+            problem_type,
+        )
+
+        threshold_met = self._check_threshold_met(
+            primary_metric,
+            primary_metric_score,
+        )
+
+        warnings = []
+        if not consistency.get("primary_metric_column_present", False):
+            warnings.append("Primary metric column is missing from leaderboard.")
+        if not consistency.get("best_model_matches_primary_metric_ranking", False):
+            warnings.append("Selected best model does not match primary metric ranking.")
+        if error_analysis.get("available") is False:
+            warnings.append(
+                f"Prediction-level error analysis unavailable: {error_analysis.get('reason')}"
+            )
+
+        key_outputs = {
+            "best_model_name": best_model_name,
+            "primary_metric_score": primary_metric_score,
+            "all_metrics": evaluation_block.get("metrics", {}),
+            "evaluation_grade": evaluation_grade,
+            "threshold_met": threshold_met,
+        }
+
+        decisions = [
+            {
+                "decision": "selected_best_model",
+                "value": best_model_name,
+                "reason": f"Model selected using primary metric '{primary_metric}'.",
+            },
+            {
+                "decision": "resolved_task_variant",
+                "value": self.summary_.get("task_variant"),
+                "reason": "Task-aware evaluator selected automatically from modelling metadata and prediction outputs.",
+            },
+        ]
+
+        return {
+            "stage_id": "stage_5",
+            "stage_name": "EvaluationAgent",
+            "status": "completed",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "summary": (
+                f"Evaluation completed for {self.summary_.get('task_variant')} using "
+                f"primary metric '{primary_metric}'. Best model: {best_model_name}."
+            ),
+            "key_outputs": key_outputs,
+            "decisions": decisions,
+            "warnings": warnings,
+        }
 
     def _load_required_json(self, path: Path) -> Dict[str, Any]:
         if not path.exists():
